@@ -5,10 +5,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# IPv6 Problem umgehen: ?host= Parameter erzwingt IPv4
+conninfo = os.getenv("DATABASE_URL") + "?sslmode=require"
+
 pool = ConnectionPool(
-    conninfo=os.getenv("DATABASE_URL"),
-    min_size=2,
+    conninfo=conninfo,
+    min_size=1,
     max_size=10,
+    kwargs={"connect_timeout": 10}
 )
 
 @contextmanager
