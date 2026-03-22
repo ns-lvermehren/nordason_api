@@ -1,6 +1,5 @@
 import os
 from contextlib import contextmanager
-import psycopg
 from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 
