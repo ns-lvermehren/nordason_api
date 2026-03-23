@@ -120,8 +120,8 @@ async def upload_bom(
                     cur.execute("""
                         INSERT INTO staging_bom
                             (version_id, parent_temp_ref, child_temp_ref,
-                             qty, unit)
-                        VALUES (%s, %s, %s, %s, 'Stk')
+                             qty)
+                        VALUES (%s, %s, %s, %s)
                     """, (version_id, parent_ref, child_ref, qty))
 
                 # Wurzeln (kein Parent) in staging_bom eintragen

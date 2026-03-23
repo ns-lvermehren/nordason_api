@@ -11,7 +11,6 @@ class BOMNode:
     article_type: str
     parent_ref:   Optional[str]
     qty:          float
-    unit:         str = 'Stk'
     bemerkung:    Optional[str] = None
     is_existing:  bool = False  # True wenn item_ref numerisch = internal_reference
 
