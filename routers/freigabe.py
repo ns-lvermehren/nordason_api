@@ -16,8 +16,11 @@ def freigabe(
     Alle 'neu_anlegen' Artikel werden atomar angelegt.
     Blockiert wenn noch offene Positionen vorhanden.
     """
-    with get_conn(user) as conn:
-        result = freigabe_durchfuehren(version_id, user, conn)
+    try:
+        with get_conn(user) as conn:
+            result = freigabe_durchfuehren(version_id, user, conn)
+    except Exception as e:
+        raise HTTPException(500, detail=f"Freigabe fehlgeschlagen: {str(e)}")
 
     if not result["ok"]:
         raise HTTPException(400, detail=result["fehler"])
