@@ -1,10 +1,13 @@
+# routers/upload.py
 import tempfile
 import os
+import json
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from db import get_conn
 from services.parser import parse_excel_bom
 
 router = APIRouter()
+
 
 @router.post("")
 async def upload_bom(
@@ -12,15 +15,38 @@ async def upload_bom(
     session_id: int        = Form(...),
     user:       str        = Form("system"),
 ):
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(400, "Nur Excel-Dateien erlaubt")
+    # Datei-Validierung
+    allowed_extensions = ('.xlsx', '.xls')
+    filename     = file.filename or ''
+    content_type = file.content_type or ''
 
+    if not (
+        filename.lower().endswith(allowed_extensions) or
+        'spreadsheet' in content_type or
+        'excel' in content_type or
+        'openxmlformats' in content_type
+    ):
+        raise HTTPException(
+            400,
+            f"Nur Excel-Dateien erlaubt "
+            f"(erhalten: filename='{filename}', content_type='{content_type}')"
+        )
+
+    # Temporär speichern
     with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
 
     try:
+        # Excel parsen
         nodes, beziehungen = parse_excel_bom(tmp_path)
+
+        if not nodes:
+            raise HTTPException(
+                400,
+                "Keine Daten gefunden — prüfe ob die Datei das BOM-Sheet "
+                "enthält und ab Zeile 4 Daten hat."
+            )
 
         with get_conn(user) as conn:
             with conn.cursor() as cur:
@@ -31,12 +57,13 @@ async def upload_bom(
                     SELECT %s,
                            COALESCE(MAX(version_nr), 0) + 1,
                            'Excel-Upload: ' || %s
-                    FROM bom_version WHERE session_id = %s
+                    FROM bom_version
+                    WHERE session_id = %s
                     RETURNING id
-                """, (session_id, file.filename, session_id))
+                """, (session_id, filename, session_id))
                 version_id = cur.fetchone()[0]
 
-                neue = 0
+                neue    = 0
                 bekannt = 0
 
                 for node in nodes:
@@ -48,11 +75,17 @@ async def upload_bom(
                                  match_status, matched_ref)
                             VALUES (%s, %s, %s, %s, 'matched', %s)
                             ON CONFLICT (version_id, temp_ref) DO NOTHING
-                        """, (version_id, node.temp_ref, node.name,
-                              node.article_type, node.temp_ref))
+                        """, (
+                            version_id,
+                            node.temp_ref,
+                            node.name,
+                            node.article_type,
+                            node.temp_ref,
+                        ))
                         bekannt += 1
+
                     else:
-                        # Neu → Fuzzy-Match Vorschläge vorberechnen
+                        # Neu → Fuzzy-Hits vorberechnen
                         cur.execute("""
                             SELECT internal_reference, name, article_type, score
                             FROM fuzzy_match_artikel(%s, %s, 5, 0.25)
@@ -65,41 +98,57 @@ async def upload_bom(
                                  match_status, fuzzy_hits)
                             VALUES (%s, %s, %s, %s, 'offen', %s)
                             ON CONFLICT (version_id, temp_ref) DO NOTHING
-                        """, (version_id, node.temp_ref, node.name,
-                              node.article_type,
-                              __import__('json').dumps([
-                                  {"ref": h[0], "name": h[1],
-                                   "type": h[2], "score": h[3]}
-                                  for h in hits
-                              ])))
+                        """, (
+                            version_id,
+                            node.temp_ref,
+                            node.name,
+                            node.article_type,
+                            json.dumps([
+                                {
+                                    "ref":   h[0],
+                                    "name":  h[1],
+                                    "type":  h[2],
+                                    "score": h[3],
+                                }
+                                for h in hits
+                            ]),
+                        ))
                         neue += 1
 
-                # BOM Beziehungen
+                # BOM-Beziehungen einfügen
                 for parent_ref, child_ref, qty in beziehungen:
                     cur.execute("""
                         INSERT INTO staging_bom
-                            (version_id, parent_temp_ref, child_temp_ref, qty, unit)
+                            (version_id, parent_temp_ref, child_temp_ref,
+                             qty, unit)
                         VALUES (%s, %s, %s, %s, 'Stk')
-                        ON CONFLICT DO NOTHING
                     """, (version_id, parent_ref, child_ref, qty))
 
-                # Wurzeln (kein Parent)
+                # Wurzeln (kein Parent) in staging_bom eintragen
                 for node in nodes:
                     if node.parent_ref is None:
                         cur.execute("""
                             INSERT INTO staging_bom
-                                (version_id, parent_temp_ref, child_temp_ref, qty)
+                                (version_id, parent_temp_ref,
+                                 child_temp_ref, qty)
                             VALUES (%s, NULL, %s, 1)
                         """, (version_id, node.temp_ref))
 
         return {
-            "version_id":  version_id,
-            "artikel_neu": neue,
+            "version_id":      version_id,
+            "artikel_neu":     neue,
             "artikel_bekannt": bekannt,
-            "artikel_gesamt": len(nodes),
-            "beziehungen": len(beziehungen),
-            "status": "staging"
+            "artikel_gesamt":  len(nodes),
+            "beziehungen":     len(beziehungen),
+            "status":          "staging",
         }
 
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(500, f"Upload fehlgeschlagen: {str(e)}")
+
     finally:
-        os.unlink(tmp_path)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
