@@ -15,7 +15,6 @@ async def upload_bom(
     session_id: int        = Form(...),
     user:       str        = Form("system"),
 ):
-    # Datei-Validierung
     allowed_extensions = ('.xlsx', '.xls')
     filename     = file.filename or ''
     content_type = file.content_type or ''
@@ -32,20 +31,18 @@ async def upload_bom(
             f"(erhalten: filename='{filename}', content_type='{content_type}')"
         )
 
-    # Temporär speichern
     with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
 
     try:
-        # Excel parsen
         nodes, beziehungen = parse_excel_bom(tmp_path)
 
         if not nodes:
             raise HTTPException(
                 400,
-                "Keine Daten gefunden — prüfe ob die Datei das BOM-Sheet "
-                "enthält und ab Zeile 4 Daten hat."
+                "Keine Daten gefunden — prüfe ob das erste Sheet "
+                "ab Zeile 3 Daten enthält."
             )
 
         with get_conn(user) as conn:
@@ -68,7 +65,6 @@ async def upload_bom(
 
                 for node in nodes:
                     if node.is_existing:
-                        # Bereits in product_master → direkt als matched markieren
                         cur.execute("""
                             INSERT INTO staging_artikel
                                 (version_id, temp_ref, name, article_type,
@@ -83,9 +79,8 @@ async def upload_bom(
                             node.temp_ref,
                         ))
                         bekannt += 1
-
                     else:
-                        # Neu → Fuzzy-Hits vorberechnen
+                        # Fuzzy-Hits vorberechnen
                         cur.execute("""
                             SELECT internal_reference, name, article_type, score
                             FROM fuzzy_match_artikel(%s, %s, 5, 0.25)
@@ -115,24 +110,13 @@ async def upload_bom(
                         ))
                         neue += 1
 
-                # BOM-Beziehungen einfügen
+                # BOM-Beziehungen einfügen (kein Wurzel-Block)
                 for parent_ref, child_ref, qty in beziehungen:
                     cur.execute("""
                         INSERT INTO staging_bom
-                            (version_id, parent_temp_ref, child_temp_ref,
-                             qty)
+                            (version_id, parent_temp_ref, child_temp_ref, qty)
                         VALUES (%s, %s, %s, %s)
                     """, (version_id, parent_ref, child_ref, qty))
-
-                # Wurzeln (kein Parent) in staging_bom eintragen
-                for node in nodes:
-                    if node.parent_ref is None:
-                        cur.execute("""
-                            INSERT INTO staging_bom
-                                (version_id, parent_temp_ref,
-                                 child_temp_ref, qty)
-                            VALUES (%s, NULL, %s, 1)
-                        """, (version_id, node.temp_ref))
 
         return {
             "version_id":      version_id,
