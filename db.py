@@ -5,18 +5,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# IPv6 Problem umgehen: ?host= Parameter erzwingt IPv4
-conninfo = os.getenv("DATABASE_URL") + "?sslmode=require"
-
 pool = ConnectionPool(
-    conninfo=conninfo,
-    min_size=1,
+    conninfo=os.getenv("DATABASE_URL"),
+    min_size=0,           # kein sofortiger Verbindungsaufbau beim Start
     max_size=10,
+    open=False,           # Pool erst beim ersten Request öffnen
     kwargs={"connect_timeout": 10}
 )
 
 @contextmanager
 def get_conn(current_user: str = "system"):
+    if not pool.closed:
+        pass
+    else:
+        pool.open()
+
     with pool.connection() as conn:
         conn.execute(
             "SELECT set_config('app.current_user', %s, true)",
