@@ -46,14 +46,25 @@ def _clean(val) -> Optional[str]:
     return s if s else None
 
 
+def _normalize_article_type(val: Optional[str]) -> Optional[str]:
+    """
+    Ersten Buchstaben groß, Rest klein.
+    Gibt None zurück wenn kein Wert — wird im Parser
+    durch den Typ der übergeordneten Ebene aufgelöst.
+    """
+    if not val or not val.strip():
+        return None
+    return val.strip().capitalize()
+
+
 def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
     """
     Parst die Nordason BOM-Vorlage (nordason_bom_vorlage_v2.xlsx).
 
     Sheet: BOM
-    Zeile 1: Gruppenheader (übersprungen)
-    Zeile 2: Spaltenheader (übersprungen)
-    Zeile 3: Beschreibung  (übersprungen)
+    Zeile 1: Gruppenheader     (übersprungen)
+    Zeile 2: Spaltenheader     (übersprungen)
+    Zeile 3: Beschreibungszeile (übersprungen)
     Ab Zeile 4: Daten
 
     Spalten (1-basiert):
@@ -62,15 +73,21 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
       3  package_ref        Ebene 2 Referenz
       4  package_name       Ebene 2 Name
       5  package_qty        Menge Ebene 2 in Ebene 1
-      6  sub_ref            Ebene 3 Referenz (optional, leer = kein Sub-Assembly)
-      7  sub_name           Ebene 3 Name (automatisch per Formel, Fallback im Parser)
+      6  sub_ref            Ebene 3 Referenz (optional)
+      7  sub_name           Ebene 3 Name (automatisch per Formel)
       8  sub_qty            Menge Ebene 3 in Ebene 2
       9  sub_article_type   Artikeltyp Ebene 3
       10 item_ref           Ebene 4 Referenz
       11 item_name          Ebene 4 Name
-      12 item_qty           Menge Ebene 4 in übergeordneter Ebene
+      12 item_qty           Menge Ebene 4
       13 item_article_type  Artikeltyp Ebene 4
       14 bemerkung          Interne Notiz
+
+    Artikeltypen Mapping:
+      Ebene 1 (set_ref)  → immer 'Set'
+      Ebene 2 (pkg_ref)  → immer 'Set'
+      Ebene 3 (sub_ref)  → aus Spalte 9, Fallback 'Set'
+      Ebene 4 (item_ref) → aus Spalte 13, Fallback aus is_existing Lookup
 
     Gibt zurück:
       nodes        — Liste aller eindeutigen BOMNode Objekte
@@ -78,7 +95,7 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
     """
     wb = openpyxl.load_workbook(pfad, read_only=True, data_only=True)
 
-    # BOM Sheet finden — flexibel falls Dateiname leicht abweicht
+    # BOM Sheet finden — flexibel falls Name leicht abweicht
     ws = None
     for sheet_name in wb.sheetnames:
         if 'bom' in sheet_name.lower():
@@ -87,8 +104,8 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
     if ws is None:
         ws = wb.active
 
-    nodes: dict[str, BOMNode] = {}        # temp_ref → BOMNode
-    beziehungen: list[tuple] = []          # (parent_ref, child_ref, qty)
+    nodes: dict[str, BOMNode] = {}
+    beziehungen: list[tuple] = []
 
     for row in ws.iter_rows(min_row=4, values_only=True):
 
@@ -103,29 +120,36 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
         pkg_name     = _clean(row[3])
         pkg_qty      = _parse_qty(row[4])
         sub_ref      = _clean(row[5])
-        sub_name_raw = _clean(row[6])   # aus Excel-Formel (data_only=True)
+        sub_name_raw = _clean(row[6])
         sub_qty      = _parse_qty(row[7])
-        sub_type  = _normalize_article_type(_clean(row[8]))
+        sub_type_raw = _normalize_article_type(_clean(row[8]))
         item_ref     = _clean(row[9])
         item_name    = _clean(row[10])
         item_qty     = _parse_qty(row[11])
-        item_type = _normalize_article_type(_clean(row[12]))
+        item_type_raw = _normalize_article_type(_clean(row[12]))
         bemerkung    = _clean(row[13])
 
-        # Mindestanforderung: item_ref muss vorhanden sein
+        # Mindestanforderung
         if not item_ref:
             continue
 
+        # ── article_type Auflösung ────────────────────────────
+        # Regel: immer ein Typ gesetzt, auch bei bestehenden Artikeln.
+        # Wenn Spalte leer → sinnvoller Fallback je Ebene.
+        sub_type  = sub_type_raw  or 'Set'
+        item_type = item_type_raw or (
+            'Single' if not _is_internal_reference(item_ref)
+            else 'Single'   # bestehende Artikel: Single als sicherer Default
+                            # wird im Review ggf. korrigiert
+        )
+
         # ── sub_name berechnen ────────────────────────────────
-        # Wenn sub_ref gesetzt: sub_name aus Formel übernehmen
-        # oder selbst berechnen als Fallback
         if sub_ref:
             if sub_name_raw and sub_name_raw != sub_ref:
                 sub_name = sub_name_raw
             else:
-                # Fallback: selbst zusammensetzen
-                qty_str  = str(int(item_qty)) if item_qty == int(item_qty) \
-                           else str(item_qty)
+                qty_str  = str(int(item_qty)) \
+                           if item_qty == int(item_qty) else str(item_qty)
                 sub_name = f"Polybag | {qty_str}x {item_name}" \
                            if item_name else f"Polybag | {sub_ref}"
         else:
@@ -169,7 +193,7 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
                 beziehungen.append((pkg_ref, sub_ref, sub_qty))
 
         # ── Ebene 4: Einzelartikel ────────────────────────────
-        # Parent = sub_ref wenn vorhanden, sonst pkg_ref (G leer → direkt in F)
+        # Parent = sub_ref wenn vorhanden, sonst pkg_ref
         item_parent = sub_ref if sub_ref else pkg_ref
 
         if item_ref and item_ref not in nodes:
