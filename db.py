@@ -7,10 +7,11 @@ load_dotenv()
 
 pool = ConnectionPool(
     conninfo=os.getenv("DATABASE_URL"),
-    min_size=0,           # kein sofortiger Verbindungsaufbau beim Start
+    min_size=0,
     max_size=10,
-    open=False,           # Pool erst beim ersten Request öffnen
-    kwargs={"connect_timeout": 10}
+    open=False,
+    kwargs={"connect_timeout": 30},
+    timeout=60              # warte bis zu 60 Sekunden auf eine Verbindung
 )
 
 @contextmanager
