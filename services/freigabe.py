@@ -4,10 +4,15 @@ from services.gtin import generiere_gtin
 
 
 def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
+    """
+    Bulk-Freigabe einer kompletten BOM-Version.
+    Alle 'neu_anlegen' Artikel werden in einer Transaktion angelegt.
+    Alles oder nichts.
+    """
     cur = conn.cursor()
 
     try:
-        # 1. Sicherheitsprüfung
+        # 1. Sicherheitsprüfung: keine offenen Positionen
         cur.execute("""
             SELECT COUNT(*) FROM staging_artikel
             WHERE version_id = %s AND match_status = 'offen'
@@ -85,12 +90,12 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
                           f"aufgelöst werden — bitte Review prüfen."
             }
 
-        # 6. Bulk: alle Beziehungen in produktive bom schreiben
-        # Kein ON CONFLICT — gleiche parent/child Paare in verschiedenen
-        # Sets sind gewollt
+        # 6. Bulk: alle eindeutigen Beziehungen in produktive bom schreiben
+        # DISTINCT verhindert Duplikate, ON CONFLICT DO NOTHING
+        # sichert gegen bereits existierende Paare ab
         cur.execute("""
             INSERT INTO bom (parent, child, qty)
-            SELECT
+            SELECT DISTINCT
                 sb.parent_ref,
                 sb.child_ref,
                 sb.qty::int
@@ -101,6 +106,7 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
             WHERE sb.version_id = %s
               AND sa_child.match_status != 'ignorieren'
               AND sb.child_ref IS NOT NULL
+            ON CONFLICT DO NOTHING
         """, (version_id,))
 
         # 7. Session auf freigegeben setzen

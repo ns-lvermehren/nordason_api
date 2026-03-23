@@ -46,8 +46,9 @@ async def upload_bom(
             )
 
         with get_conn(user) as conn:
-            with conn.cursor() as cur:
+            cur = conn.cursor()
 
+            try:
                 # Neue Version anlegen
                 cur.execute("""
                     INSERT INTO bom_version (session_id, version_nr, kommentar)
@@ -110,20 +111,28 @@ async def upload_bom(
                         ))
                         neue += 1
 
-                # BOM-Beziehungen einfügen (kein Wurzel-Block)
+                # BOM-Beziehungen einfügen
+                # Eindeutig pro (parent_temp_ref, child_temp_ref)
+                seen_beziehungen = set()
                 for parent_ref, child_ref, qty in beziehungen:
-                    cur.execute("""
-                        INSERT INTO staging_bom
-                            (version_id, parent_temp_ref, child_temp_ref, qty)
-                        VALUES (%s, %s, %s, %s)
-                    """, (version_id, parent_ref, child_ref, qty))
+                    key = (parent_ref, child_ref)
+                    if key not in seen_beziehungen:
+                        seen_beziehungen.add(key)
+                        cur.execute("""
+                            INSERT INTO staging_bom
+                                (version_id, parent_temp_ref, child_temp_ref, qty)
+                            VALUES (%s, %s, %s, %s)
+                        """, (version_id, parent_ref, child_ref, qty))
+
+            finally:
+                cur.close()
 
         return {
             "version_id":      version_id,
             "artikel_neu":     neue,
             "artikel_bekannt": bekannt,
             "artikel_gesamt":  len(nodes),
-            "beziehungen":     len(beziehungen),
+            "beziehungen":     len(seen_beziehungen),
             "status":          "staging",
         }
 
