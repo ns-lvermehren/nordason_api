@@ -1,3 +1,4 @@
+# db.py
 import os
 from contextlib import contextmanager
 from psycopg_pool import ConnectionPool
@@ -10,20 +11,20 @@ pool = ConnectionPool(
     min_size=0,
     max_size=10,
     open=False,
-    kwargs={"connect_timeout": 30},
-    timeout=60              # warte bis zu 60 Sekunden auf eine Verbindung
+    kwargs={"connect_timeout": 30, "autocommit": False},
+    timeout=60
 )
 
 @contextmanager
 def get_conn(current_user: str = "system"):
-    if not pool.closed:
-        pass
-    else:
-        pool.open()
-
     with pool.connection() as conn:
         conn.execute(
             "SELECT set_config('app.current_user', %s, true)",
             (current_user,)
         )
-        yield conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise

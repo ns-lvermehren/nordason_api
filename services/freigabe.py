@@ -9,8 +9,10 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
     Alle 'neu_anlegen' Artikel werden in einer Transaktion angelegt.
     Alles oder nichts.
     """
-    with conn.cursor() as cur:
+    # Cursor ohne with-Block — bleibt offen für die gesamte Transaktion
+    cur = conn.cursor()
 
+    try:
         # 1. Sicherheitsprüfung: keine offenen Positionen
         cur.execute("""
             SELECT COUNT(*) FROM staging_artikel
@@ -47,7 +49,6 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
                 ON CONFLICT (internal_reference) DO NOTHING
             """, (internal_reference, name, article_type))
 
-            # matched_ref und internal_reference in staging_artikel setzen
             cur.execute("""
                 UPDATE staging_artikel
                 SET matched_ref        = %s,
@@ -117,11 +118,12 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
               AND bv.id         = %s
         """, (version_id,))
 
-    conn.commit()
+        return {
+            "ok":           True,
+            "version_id":   version_id,
+            "neu_angelegt": neu_angelegt,
+            "status":       "freigegeben",
+        }
 
-    return {
-        "ok":           True,
-        "version_id":   version_id,
-        "neu_angelegt": neu_angelegt,
-        "status":       "freigegeben",
-    }
+    finally:
+        cur.close()
