@@ -105,11 +105,11 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
         sub_ref      = _clean(row[5])
         sub_name_raw = _clean(row[6])   # aus Excel-Formel (data_only=True)
         sub_qty      = _parse_qty(row[7])
-        sub_type     = _clean(row[8]) or 'Set'
+        sub_type  = _normalize_article_type(_clean(row[8]))
         item_ref     = _clean(row[9])
         item_name    = _clean(row[10])
         item_qty     = _parse_qty(row[11])
-        item_type    = _clean(row[12]) or 'Single'
+        item_type = _normalize_article_type(_clean(row[12]))
         bemerkung    = _clean(row[13])
 
         # Mindestanforderung: item_ref muss vorhanden sein
