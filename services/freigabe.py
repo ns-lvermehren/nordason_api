@@ -119,20 +119,23 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
 
         # 7. Bulk: alle eindeutigen Beziehungen in produktive bom schreiben
         cur.execute("""
-            INSERT INTO bom (parent, child, qty)
-            SELECT DISTINCT
-                sb.parent_ref,
-                sb.child_ref,
-                sb.qty::int
-            FROM staging_bom sb
-            JOIN staging_artikel sa_child
-              ON sa_child.temp_ref    = sb.child_temp_ref
-             AND sa_child.version_id  = sb.version_id
-            WHERE sb.version_id = %s
-              AND sa_child.match_status != 'ignorieren'
-              AND sb.child_ref IS NOT NULL
-            ON CONFLICT DO NOTHING
-        """, (version_id,))
+    INSERT INTO bom (parent, child, qty, version_id, session_id)
+    SELECT DISTINCT
+        sb.parent_ref,
+        sb.child_ref,
+        sb.qty::int,
+        sb.version_id,
+        bv.session_id
+    FROM staging_bom sb
+    JOIN bom_version bv ON bv.id = sb.version_id
+    JOIN staging_artikel sa_child
+      ON sa_child.temp_ref    = sb.child_temp_ref
+     AND sa_child.version_id  = sb.version_id
+    WHERE sb.version_id = %s
+      AND sa_child.match_status != 'ignorieren'
+      AND sb.child_ref IS NOT NULL
+    ON CONFLICT DO NOTHING
+""", (version_id,))
 
         # 8. Session auf freigegeben setzen
         cur.execute("""
