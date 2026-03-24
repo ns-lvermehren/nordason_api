@@ -8,10 +8,15 @@ class FreigabeFehler(Exception):
 
 
 def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
+    """
+    Bulk-Freigabe einer kompletten BOM-Version.
+    Alle 'neu_anlegen' Artikel werden in einer Transaktion angelegt.
+    Alles oder nichts — bei Fehler wird alles zurückgerollt.
+    """
     cur = conn.cursor()
 
     try:
-        # 1. Sicherheitsprüfung
+        # 1. Sicherheitsprüfung: keine offenen Positionen
         cur.execute("""
             SELECT COUNT(*) FROM staging_artikel
             WHERE version_id = %s AND match_status = 'offen'
@@ -24,7 +29,21 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
                           f"bitte alle matchen oder ignorieren."
             }
 
-        # 2. Alle neuen Artikel holen inkl. polybag Flag
+        # 2. Version und Session Info holen
+        cur.execute("""
+            SELECT bv.id, bv.session_id
+            FROM bom_version bv
+            WHERE bv.id = %s
+        """, (version_id,))
+        bv_row = cur.fetchone()
+        if not bv_row:
+            return {
+                "ok":     False,
+                "fehler": f"Version {version_id} nicht gefunden."
+            }
+        bv_id, bs_id = bv_row[0], bv_row[1]
+
+        # 3. Alle neuen Artikel holen inkl. polybag Flag
         cur.execute("""
             SELECT id, temp_ref, name, article_type, polybag
             FROM staging_artikel
@@ -35,11 +54,12 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
         """, (version_id,))
         neue_artikel = cur.fetchall()
 
-        # 3. Nummern vorab generieren und auf Duplikate prüfen
+        # 4. Nummern vorab generieren und auf Duplikate prüfen
         geplante_artikel = []
         for sa_id, temp_ref, name, article_type, polybag in neue_artikel:
             internal_reference = generiere_artikelnummer(conn, article_type)
 
+            # Prüfen ob Nummer bereits in product_master existiert
             cur.execute("""
                 SELECT COUNT(*) FROM product_master
                 WHERE internal_reference = %s
@@ -57,16 +77,18 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
                 polybag or False
             ))
 
-        # 4. Alle Artikel in product_master anlegen
+        # 5. Alle Artikel in product_master anlegen
         neu_angelegt = 0
         for sa_id, temp_ref, name, article_type, internal_reference, polybag \
                 in geplante_artikel:
 
             cur.execute("""
                 INSERT INTO product_master
-                    (internal_reference, name, article_type, sellable, polybag)
-                VALUES (%s, %s, %s, false, %s)
-            """, (internal_reference, name, article_type, polybag))
+                    (internal_reference, name, article_type, sellable,
+                     polybag, import_version_id, import_session_id)
+                VALUES (%s, %s, %s, false, %s, %s, %s)
+            """, (internal_reference, name, article_type,
+                  polybag, bv_id, bs_id))
 
             cur.execute("""
                 UPDATE staging_artikel
@@ -78,7 +100,7 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
 
             neu_angelegt += 1
 
-        # 5. Referenzen in staging_bom auflösen
+        # 6. Referenzen in staging_bom auflösen
         cur.execute("""
             UPDATE staging_bom sb
             SET
@@ -95,7 +117,7 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
             WHERE sb.version_id = %s
         """, (version_id,))
 
-        # 6. Prüfen ob alle Referenzen aufgelöst wurden
+        # 7. Prüfen ob alle Referenzen aufgelöst wurden
         cur.execute("""
             SELECT COUNT(*) FROM staging_bom
             WHERE version_id = %s AND child_ref IS NULL
@@ -107,7 +129,7 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
                 f"werden — bitte Review prüfen."
             )
 
-        # 7. In produktive bom schreiben
+        # 8. In produktive bom schreiben
         cur.execute("""
             INSERT INTO bom (parent, child, qty, version_id, session_id)
             SELECT DISTINCT
@@ -127,7 +149,7 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
             ON CONFLICT DO NOTHING
         """, (version_id,))
 
-        # 8. Session freigeben
+        # 9. Session auf freigegeben setzen
         cur.execute("""
             UPDATE bom_session bs
             SET status         = 'freigegeben',
