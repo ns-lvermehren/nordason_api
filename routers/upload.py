@@ -2,6 +2,7 @@
 import tempfile
 import os
 import json
+from collections import defaultdict
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from db import get_conn
 from services.parser import parse_excel_bom
@@ -111,16 +112,80 @@ async def upload_bom(
                         ))
                         neue += 1
 
-                # BOM-Beziehungen einfügen
-                # Eindeutig pro (parent_temp_ref, child_temp_ref)
-                seen_beziehungen = set()
+                # ── Polybag-Wrapper erkennen ──────────────────────────
+                # Sub-Assembly mit genau einem Child und qty=1
+                # → Child bekommt polybag=True
+                # → Wrapper-Node aus staging entfernt
+                # → BOM-Beziehung direkt Package → Child
+
+                sub_children: dict[str, list] = defaultdict(list)
                 for parent_ref, child_ref, qty in beziehungen:
+                    if parent_ref is not None:
+                        sub_children[parent_ref].append((child_ref, qty))
+
+                polybag_wrapper: set[str] = set()
+                polybag_child_map: dict[str, str] = {}  # wrapper → child
+
+                for sub_ref, children in sub_children.items():
+                    # Nur echte Sub-Assemblies (P-Refs) prüfen
+                    # Set-Refs (NRV_...) und Package-Refs ausschließen
+                    node = next(
+                        (n for n in nodes if n.temp_ref == sub_ref), None
+                    )
+                    if node is None:
+                        continue
+                    # Nur Ebene-3 Nodes (haben selbst einen Parent
+                    # der wiederum einen Parent hat)
+                    if node.article_type not in ('Set', 'Assembly', 'Package'):
+                        continue
+                    if len(children) == 1 and children[0][1] == 1.0:
+                        polybag_wrapper.add(sub_ref)
+                        polybag_child_map[sub_ref] = children[0][0]
+
+                # Child-Artikel als polybag markieren
+                for wrapper_ref, child_ref in polybag_child_map.items():
+                    cur.execute("""
+                        UPDATE staging_artikel
+                        SET polybag = true
+                        WHERE version_id = %s AND temp_ref = %s
+                    """, (version_id, child_ref))
+
+                # Wrapper aus staging_artikel entfernen
+                for wrapper_ref in polybag_wrapper:
+                    cur.execute("""
+                        DELETE FROM staging_artikel
+                        WHERE version_id = %s AND temp_ref = %s
+                    """, (version_id, wrapper_ref))
+
+                # BOM-Beziehungen dedupliziert einfügen
+                # Polybag-Wrapper werden übersprungen / umgeschrieben
+                seen_beziehungen: set = set()
+
+                for parent_ref, child_ref, qty in beziehungen:
+                    # Wrapper als Parent → direkt zum echten Child
+                    if parent_ref in polybag_wrapper:
+                        continue  # diese Zeile überspringen
+                    # Wrapper als Child → umschreiben auf echten Child
+                    if child_ref in polybag_wrapper:
+                        echtes_child = polybag_child_map[child_ref]
+                        key = (parent_ref, echtes_child)
+                        if key not in seen_beziehungen:
+                            seen_beziehungen.add(key)
+                            cur.execute("""
+                                INSERT INTO staging_bom
+                                    (version_id, parent_temp_ref,
+                                     child_temp_ref, qty)
+                                VALUES (%s, %s, %s, %s)
+                            """, (version_id, parent_ref, echtes_child, qty))
+                        continue
+
                     key = (parent_ref, child_ref)
                     if key not in seen_beziehungen:
                         seen_beziehungen.add(key)
                         cur.execute("""
                             INSERT INTO staging_bom
-                                (version_id, parent_temp_ref, child_temp_ref, qty)
+                                (version_id, parent_temp_ref,
+                                 child_temp_ref, qty)
                             VALUES (%s, %s, %s, %s)
                         """, (version_id, parent_ref, child_ref, qty))
 
@@ -128,12 +193,13 @@ async def upload_bom(
                 cur.close()
 
         return {
-            "version_id":      version_id,
-            "artikel_neu":     neue,
-            "artikel_bekannt": bekannt,
-            "artikel_gesamt":  len(nodes),
-            "beziehungen":     len(seen_beziehungen),
-            "status":          "staging",
+            "version_id":        version_id,
+            "artikel_neu":       neue,
+            "artikel_bekannt":   bekannt,
+            "artikel_gesamt":    len(nodes),
+            "beziehungen":       len(seen_beziehungen),
+            "polybag_wrapper":   len(polybag_wrapper),
+            "status":            "staging",
         }
 
     except HTTPException:
