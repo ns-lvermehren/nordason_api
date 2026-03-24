@@ -72,7 +72,9 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
         item_name     = _clean(row[10])
         item_qty      = _parse_qty(row[11])
         item_type_raw = _normalize_article_type(_clean(row[12]))
-        bemerkung     = _clean(row[13])
+        # services/parser.py — Zeilen anpassen
+        bemerkung     = _clean(row[14])  # war row[13]
+        polybag       = _is_polybag(row[13])  # neu: index 13 = Spalte N
 
         if not item_ref:
             continue
