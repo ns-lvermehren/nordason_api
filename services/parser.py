@@ -120,7 +120,11 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
                 beziehungen.append((set_ref, pkg_ref, pkg_qty))
 
         # ── Ebene 3: Sub-Assembly (optional) ──────────────────
-        if sub_ref:
+        # ── Ebene 3: Sub-Assembly (optional) ──────────────────
+        # Wenn polybag=True UND qty=1 → Sub-Ref ignorieren
+        skip_sub = polybag and item_qty == 1.0
+
+        if sub_ref and not skip_sub:
             if sub_ref not in nodes:
                 nodes[sub_ref] = BOMNode(
                     temp_ref=sub_ref,
@@ -130,12 +134,12 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
                     qty=sub_qty,
                     is_existing=_is_internal_reference(sub_ref),
                 )
-            # Beziehung immer hinzufügen
             if pkg_ref:
                 beziehungen.append((pkg_ref, sub_ref, sub_qty))
 
         # ── Ebene 4: Einzelartikel ────────────────────────────
-        item_parent = sub_ref if sub_ref else pkg_ref
+        # Wenn polybag=True UND qty=1 → direkt dem Package zuordnen
+        item_parent = pkg_ref if skip_sub else (sub_ref if sub_ref else pkg_ref)
 
         if item_ref:
             if item_ref not in nodes:
