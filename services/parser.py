@@ -13,6 +13,7 @@ class BOMNode:
     qty:          float
     bemerkung:    Optional[str] = None
     is_existing:  bool = False
+    polybag:      bool = False
 
 
 def _is_internal_reference(ref: str) -> bool:
@@ -47,6 +48,12 @@ def _normalize_article_type(val: Optional[str]) -> Optional[str]:
     return val.strip().capitalize()
 
 
+def _is_polybag(val) -> bool:
+    if val is None:
+        return False
+    return str(val).strip().upper() == 'X'
+
+
 def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
     wb = openpyxl.load_workbook(pfad, read_only=True, data_only=True)
     ws = wb.worksheets[0]
@@ -54,7 +61,7 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
     nodes: dict[str, BOMNode] = {}
     beziehungen: list[tuple] = []
 
-    for row in ws.iter_rows(min_row=3, values_only=True):
+    for row in ws.iter_rows(min_row=4, values_only=True):
 
         if not any(cell for cell in row if cell is not None):
             continue
@@ -72,9 +79,8 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
         item_name     = _clean(row[10])
         item_qty      = _parse_qty(row[11])
         item_type_raw = _normalize_article_type(_clean(row[12]))
-        # services/parser.py — Zeilen anpassen
-        bemerkung     = _clean(row[14])  # war row[13]
-        polybag       = _is_polybag(row[13])  # neu: index 13 = Spalte N
+        polybag       = _is_polybag(row[13]) if len(row) > 13 else False
+        bemerkung     = _clean(row[14]) if len(row) > 14 else None
 
         if not item_ref:
             continue
@@ -82,6 +88,7 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
         sub_type  = sub_type_raw  or 'Set'
         item_type = item_type_raw or 'Single'
 
+        # Sub-Assembly Name generieren wenn nicht angegeben
         if sub_ref:
             if sub_name_raw and sub_name_raw != sub_ref:
                 sub_name = sub_name_raw
@@ -92,6 +99,9 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
                            if item_name else f"Polybag | {sub_ref}"
         else:
             sub_name = None
+
+        # Polybag + qty=1 → Sub-Ref ignorieren
+        skip_sub = polybag and item_qty == 1.0
 
         # ── Ebene 1: Set ──────────────────────────────────────
         if set_ref and set_ref not in nodes:
@@ -115,15 +125,11 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
                     qty=pkg_qty,
                     is_existing=_is_internal_reference(pkg_ref),
                 )
-            # Beziehung immer hinzufügen
             if set_ref:
                 beziehungen.append((set_ref, pkg_ref, pkg_qty))
 
         # ── Ebene 3: Sub-Assembly (optional) ──────────────────
-        # ── Ebene 3: Sub-Assembly (optional) ──────────────────
         # Wenn polybag=True UND qty=1 → Sub-Ref ignorieren
-        skip_sub = polybag and item_qty == 1.0
-
         if sub_ref and not skip_sub:
             if sub_ref not in nodes:
                 nodes[sub_ref] = BOMNode(
@@ -151,8 +157,8 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
                     qty=item_qty,
                     bemerkung=bemerkung,
                     is_existing=_is_internal_reference(item_ref),
+                    polybag=polybag,
                 )
-            # Beziehung immer hinzufügen
             if item_parent:
                 beziehungen.append((item_parent, item_ref, item_qty))
 
