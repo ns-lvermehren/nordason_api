@@ -61,7 +61,7 @@ def parse_excel_bom(pfad: str) -> tuple[list[BOMNode], list[tuple]]:
     nodes: dict[str, BOMNode] = {}
     beziehungen: list[tuple] = []
 
-    for row in ws.iter_rows(min_row=4, values_only=True):
+    for row in ws.iter_rows(min_row=3, values_only=True):
 
         if not any(cell for cell in row if cell is not None):
             continue
