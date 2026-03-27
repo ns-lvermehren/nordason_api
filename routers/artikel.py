@@ -3,16 +3,88 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from db import get_conn
+from services.artikel_nummer import generiere_artikelnummer
+from services.gtin import generiere_gtin
 
 router = APIRouter()
 
 
+class ArtikelCreate(BaseModel):
+    name:         str
+    article_type: str
+    gtin:         Optional[int]  = None
+    polybag:      Optional[bool] = False
+    sellable:     Optional[bool] = False
+
+
 class ArtikelPatch(BaseModel):
-    name:          Optional[str]   = None
-    gtin:          Optional[int]   = None
-    polybag:       Optional[bool]  = None
-    sellable:      Optional[bool]  = None
-    article_type:  Optional[str]   = None
+    name:         Optional[str]  = None
+    gtin:         Optional[int]  = None
+    polybag:      Optional[bool] = None
+    sellable:     Optional[bool] = None
+    article_type: Optional[str]  = None
+
+
+@router.post("")
+def create_artikel(
+    payload: ArtikelCreate,
+    user: str = "system"
+):
+    erlaubte_typen = {'Single', 'Smallpart', 'Assembly',
+                      'Set', 'Package', 'Template'}
+    if payload.article_type not in erlaubte_typen:
+        raise HTTPException(
+            400,
+            detail=f"Unbekannter article_type '{payload.article_type}'. "
+                   f"Erlaubt: {erlaubte_typen}"
+        )
+
+    with get_conn(user) as conn:
+        cur = conn.cursor()
+        try:
+            internal_reference = generiere_artikelnummer(conn, payload.article_type)
+
+            cur.execute("""
+                SELECT COUNT(*) FROM product_master
+                WHERE internal_reference = %s
+            """, (internal_reference,))
+            if cur.fetchone()[0] > 0:
+                raise HTTPException(
+                    500,
+                    detail=f"Artikelnummer {internal_reference} bereits vergeben. "
+                           f"Bitte Sequence prüfen."
+                )
+
+            gtin = payload.gtin if payload.gtin else generiere_gtin(conn)
+
+            cur.execute("""
+                INSERT INTO product_master
+                    (internal_reference, name, article_type,
+                     sellable, polybag, gtin)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING internal_reference, name, article_type,
+                          gtin, polybag, sellable
+            """, (
+                internal_reference,
+                payload.name,
+                payload.article_type,
+                payload.sellable or False,
+                payload.polybag or False,
+                gtin,
+            ))
+            row = cur.fetchone()
+        finally:
+            cur.close()
+
+    return {
+        "ok":                 True,
+        "internal_reference": row[0],
+        "name":               row[1],
+        "article_type":       row[2],
+        "gtin":               row[3],
+        "polybag":            row[4],
+        "sellable":           row[5],
+    }
 
 
 @router.patch("/{internal_reference}")
@@ -21,7 +93,6 @@ def patch_artikel(
     payload: ArtikelPatch,
     user: str = "system"
 ):
-    # Nur gesetzte Felder updaten
     felder = payload.model_dump(exclude_none=True)
 
     if not felder:
