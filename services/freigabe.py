@@ -1,6 +1,6 @@
 # services/freigabe.py
 from services.artikel_nummer import generiere_artikelnummer
-from services.gtin import generiere_gtin
+from services.gtin import generiere_gtin, berechne_gtin14_aus_gtin13
 
 
 class FreigabeFehler(Exception):
@@ -43,24 +43,34 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
             }
         bv_id, bs_id = bv_row[0], bv_row[1]
 
-        # 3. Alle neuen Artikel holen inkl. polybag Flag
+        # 3. Alle neuen Artikel holen — Singles/Smallparts zuerst, Packages zuletzt
+        # damit GTIN-13 der Children bereits vorhanden sind wenn Packages angelegt werden
         cur.execute("""
             SELECT id, temp_ref, name, article_type, polybag
             FROM staging_artikel
             WHERE version_id = %s
               AND match_status = 'neu_anlegen'
               AND matched_ref IS NULL
-            ORDER BY id
+            ORDER BY
+                CASE article_type
+                    WHEN 'Single'    THEN 1
+                    WHEN 'Smallpart' THEN 2
+                    WHEN 'Assembly'  THEN 3
+                    WHEN 'Set'       THEN 4
+                    WHEN 'Package'   THEN 5
+                    WHEN 'Template'  THEN 6
+                    ELSE 7
+                END,
+                id
         """, (version_id,))
         neue_artikel = cur.fetchall()
 
-        # 4. Nummern und GTINs vorab generieren und auf Duplikate prüfen
+        # 4. Artikelnummern vorab generieren und auf Duplikate prüfen
         geplante_artikel = []
         for sa_id, temp_ref, name, article_type, polybag in neue_artikel:
 
             internal_reference = generiere_artikelnummer(conn, article_type)
 
-            # Prüfen ob Nummer bereits in product_master existiert
             cur.execute("""
                 SELECT COUNT(*) FROM product_master
                 WHERE internal_reference = %s
@@ -72,19 +82,22 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
                     f"Bitte Sequences prüfen und Freigabe wiederholen."
                 )
 
-            # GTIN generieren
-            gtin = generiere_gtin(conn)
-
             geplante_artikel.append((
                 sa_id, temp_ref, name,
                 article_type, internal_reference,
-                polybag or False, gtin
+                polybag or False
             ))
 
         # 5. Alle Artikel in product_master anlegen
+        # Packages ohne GTIN — wird in Schritt 6b gesetzt
         neu_angelegt = 0
-        for sa_id, temp_ref, name, article_type, internal_reference, \
-                polybag, gtin in geplante_artikel:
+        for sa_id, temp_ref, name, article_type, internal_reference, polybag \
+                in geplante_artikel:
+
+            if article_type == 'Package':
+                gtin = None  # wird nach BOM-Auflösung gesetzt
+            else:
+                gtin = generiere_gtin(conn)
 
             cur.execute("""
                 INSERT INTO product_master
@@ -120,6 +133,39 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
                 )
             WHERE sb.version_id = %s
         """, (version_id,))
+
+        # 6b. GTIN-14 für neu angelegte Package-Artikel berechnen
+        # Package → Child BOM-Beziehung → Child GTIN-13 → Package GTIN-14
+        cur.execute("""
+            SELECT DISTINCT
+                sa_pkg.matched_ref  AS package_ref,
+                pm_child.gtin       AS child_gtin
+            FROM staging_bom sb
+            JOIN staging_artikel sa_pkg
+              ON sa_pkg.temp_ref   = sb.parent_temp_ref
+             AND sa_pkg.version_id = sb.version_id
+            JOIN staging_artikel sa_child
+              ON sa_child.temp_ref   = sb.child_temp_ref
+             AND sa_child.version_id = sb.version_id
+            JOIN product_master pm_pkg
+              ON pm_pkg.internal_reference = sa_pkg.matched_ref
+            JOIN product_master pm_child
+              ON pm_child.internal_reference = sa_child.matched_ref
+            WHERE sb.version_id        = %s
+              AND pm_pkg.article_type  = 'Package'
+              AND sa_pkg.match_status  = 'freigegeben'
+              AND pm_child.gtin        IS NOT NULL
+              AND pm_pkg.gtin          IS NULL
+        """, (version_id,))
+        package_gtins = cur.fetchall()
+
+        for package_ref, child_gtin in package_gtins:
+            gtin14 = berechne_gtin14_aus_gtin13(child_gtin)
+            cur.execute("""
+                UPDATE product_master
+                SET gtin = %s
+                WHERE internal_reference = %s
+            """, (gtin14, package_ref))
 
         # 7. Prüfen ob alle Referenzen aufgelöst wurden
         cur.execute("""
