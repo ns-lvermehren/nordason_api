@@ -54,9 +54,10 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
         """, (version_id,))
         neue_artikel = cur.fetchall()
 
-        # 4. Nummern vorab generieren und auf Duplikate prüfen
+        # 4. Nummern und GTINs vorab generieren und auf Duplikate prüfen
         geplante_artikel = []
         for sa_id, temp_ref, name, article_type, polybag in neue_artikel:
+
             internal_reference = generiere_artikelnummer(conn, article_type)
 
             # Prüfen ob Nummer bereits in product_master existiert
@@ -71,24 +72,27 @@ def freigabe_durchfuehren(version_id: int, user: str, conn) -> dict:
                     f"Bitte Sequences prüfen und Freigabe wiederholen."
                 )
 
+            # GTIN generieren
+            gtin = generiere_gtin(conn)
+
             geplante_artikel.append((
                 sa_id, temp_ref, name,
                 article_type, internal_reference,
-                polybag or False
+                polybag or False, gtin
             ))
 
         # 5. Alle Artikel in product_master anlegen
         neu_angelegt = 0
-        for sa_id, temp_ref, name, article_type, internal_reference, polybag \
-                in geplante_artikel:
+        for sa_id, temp_ref, name, article_type, internal_reference, \
+                polybag, gtin in geplante_artikel:
 
             cur.execute("""
                 INSERT INTO product_master
                     (internal_reference, name, article_type, sellable,
-                     polybag, import_version_id, import_session_id)
-                VALUES (%s, %s, %s, false, %s, %s, %s)
+                     polybag, import_version_id, import_session_id, gtin)
+                VALUES (%s, %s, %s, false, %s, %s, %s, %s)
             """, (internal_reference, name, article_type,
-                  polybag, bv_id, bs_id))
+                  polybag, bv_id, bs_id, gtin))
 
             cur.execute("""
                 UPDATE staging_artikel
