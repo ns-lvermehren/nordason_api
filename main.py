@@ -1,9 +1,9 @@
-from fastapi import FastAPI
+# main.py
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi import Request
 import traceback
-from routers import upload, fuzzy, freigabe
+from routers import upload, fuzzy, freigabe, artikel
 from db import pool
 
 app = FastAPI(title="Nordason API")
@@ -17,7 +17,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
-    pool.open(wait=False)   # nicht blockieren beim Start
+    pool.open(wait=False)
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -33,6 +33,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(upload.router,   prefix="/upload",   tags=["upload"])
 app.include_router(fuzzy.router,    prefix="/fuzzy",    tags=["fuzzy"])
 app.include_router(freigabe.router, prefix="/freigabe", tags=["freigabe"])
+app.include_router(artikel.router,  prefix="/artikel",  tags=["artikel"])
 
 @app.get("/health")
 def health():
